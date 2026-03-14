@@ -1,94 +1,105 @@
-#=================================================
-# Description: Build OpenWrt using GitHub Actions
-# Lisence: MIT
-# Author: eSirPlayground
-# Youtube Channel: https://goo.gl/fvkdwm 
-#=================================================
 
-name: Build_x86
-
-# Add a button to trigger the workflow
-on: 
-  repository_dispatch:
+name: Build OpenWRT for SV3-26026
+on:
   workflow_dispatch:
+  schedule:
+    - cron: '0 2 * * 1' # 每周一凌晨2点自动构建
+    
+env:
+  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_BRANCH: master
+  FEEDS_CONF: feeds.conf.default
+  CONFIG_FILE: .config
+  DIY_SH: diy.sh
+  UPLOAD_BIN_DIR: false
+  TZ: Asia/Shanghai
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-
+    runs-on: ubuntu-22.04
     steps:
     - name: Checkout
-      uses: actions/checkout@master
+      uses: actions/checkout@v4
 
-    - name: Initialization environment
+    - name: Initialization Environment
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
-        set +e
-        docker rmi `docker images -q`
-        echo "Deleting files, please wait ..."
-        sudo rm -rf \
-          /usr/share/dotnet \
-          /etc/mysql \
-          /usr/local/lib/android \
-          /opt/ghc \
-          /etc/php
-        sudo -E apt-get -y purge azure-cli* docker* ghc* zulu* hhvm* llvm* firefox* google* dotnet* aspnetcore* powershell* openjdk* adoptopenjdk* mysql* php* mongodb* moby* snap* || true
-        sudo -E apt-get update
-        sudo -E apt-get -y install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev qemu-img
-        sudo -E apt-get -y autoremove --purge
-        sudo -E apt-get clean
+        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install build-essential asciidoc binutils bzip2 gawk gettext git libncurses5-dev libz-dev patch python3 unzip zlib1g-dev libc6-dev-i386 subversion flex uglifyjs gcc-multilib p7zip p7zip-full msmtp libssl-dev texinfo libglib2.0-dev xmlto qemu-utils upx libelf-dev autoconf automake libtool autopoint device-tree-compiler g++-multilib antlr3 gperf wget ccache curl swig rsync
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
+        sudo timedatectl set-timezone "$TZ"
 
-    - name: Clone source code
-      env: 
-        REPO_URL: https://github.com/coolsnowwolf/lede
-        REPO_BRANCH: master
+    - name: Clone Source Code
       run: |
-        git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
+        git clone $REPO_URL -b $REPO_BRANCH openwrt
         cd openwrt
-        echo "src-git ssrp https://github.com/fw876/helloworld.git" >> ./feeds.conf.default
-
-    - name: Update & Install feeds
-      working-directory: ./openwrt
+        
+    - name: Update Feeds
       run: |
+        cd openwrt
         ./scripts/feeds update -a
         ./scripts/feeds install -a
-        ./scripts/feeds install -a
 
-    #- name: Import external feeds - passwall
-    #  working-directory: ./openwrt
-    #  run: |
-    #    git clone https://github.com/xiaorouji/openwrt-passwall.git package/lienol
-    #    git clone "your_github_link" package/"your_folder_name"      
-
-    #- name: Import external feeds - JerryKuKu Argon
-    #  working-directory: ./openwrt
-    #  run: |
-    #    git clone -b 18.06 https://github.com/jerrykuku/luci-theme-argon.git package/luci-theme-argon-jerrykuku
-
-    - name: Configuration Customization - Build_x86
-      env:
-        CONFIG_FILE: 'x86.config'
+    - name: Load Custom Configuration
       run: |
+        [ -e files ] && mv files openwrt/files
         [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
-        chmod +x ./customize.sh && ./customize.sh
-        cd openwrt && make defconfig
-        
-    - name: Download package
-      working-directory: ./openwrt
+        chmod +x $DIY_SH
+        cd openwrt
+        ../$DIY_SH
+
+    - name: Download Package Sources
       run: |
-        make download -j$(nproc)
+        cd openwrt
+        make defconfig
+        make download -j8
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
 
-    - name: Build firmware
-      working-directory: ./openwrt
+    - name: Compile Firmware
       run: |
-        echo -e "$(nproc) thread build."
-        make -j$(nproc) V=s
+        cd openwrt
+        echo -e "$(nproc) threads compilation started..."
+        make -j$(nproc) || make -j1 V=s
+        echo "Compile completed!"
 
-    - name : Upload artifact
-      uses: actions/upload-artifact@master
+    - name: Prepare Artifacts
+      run: |
+        cd openwrt
+        mkdir -p ./artifact/firmware
+        cp .config ./artifact/
+        
+        # Copy firmware images
+        cp bin/targets/*/*/openwrt-*-x86-64-generic-squashfs-combined.img ./artifact/firmware/ 2>/dev/null || echo "No combined image found"
+        cp bin/targets/*/*/openwrt-*-x86-64-generic-ext4-rootfs.img ./artifact/firmware/ 2>/dev/null || echo "No ext4 rootfs image found"
+        
+        # Generate checksums
+        cd ./artifact/firmware
+        md5sum *.img > md5sums.txt 2>/dev/null || echo "No images to hash"
+        
+    - name: Upload Firmware
+      uses: actions/upload-artifact@v4
       with:
-        name: OpenWrt
-        path: openwrt/bin
+        name: OpenWRT-SV326026-Firmware
+        path: openwrt/artifact/
+
+    - name: Release Firmware
+      uses: softprops/action-gh-release@v1
+      if: github.event_name == 'workflow_dispatch' || github.repository == 'coolsnowwolf/lede'
+      with:
+        tag_name: sv326026-${{ env.TODAY }}
+        files: |
+          openwrt/artifact/firmware/*.img
+          openwrt/artifact/.config
+        body: |
+          Automated build for信步SV3-26026 OpenWRT firmware
+          Built on: $(date '+%Y-%m-%d %H:%M:%S')
+          
+          Includes:
+          - Dual Gigabit Ethernet support (RTL8111E/F)
+          - USB storage and serial support
+          - PassWall, AdGuardHome, SQM QoS plugins
+          - Optimized for Intel Atom N2600 platform
